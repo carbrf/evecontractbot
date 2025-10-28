@@ -13,7 +13,7 @@ let users = {};
 const ESI_BASE = 'https://esi.evetech.net/latest';
 const AUTH_URL = 'https://login.eveonline.com/v2/oauth/authorize';
 const TOKEN_URL = 'https://login.eveonline.com/v2/oauth/token';
-const SCOPES = 'esi-characters.read_contracts.v1';
+const SCOPES = 'esi-contracts.read_character_contracts.v1';
 
 function generatePKCE() {
   const verifier = crypto.randomBytes(32).toString('base64url');
