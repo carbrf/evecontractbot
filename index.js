@@ -1,12 +1,14 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 const express = require('express');
-const fetch = require('node-fetch'); // ← THIS WILL WORK AFTER package.json FIX
+// ← REMOVE: const fetch = require('node-fetch');
 const crypto = require('crypto');
 
+// Node.js 18+ has global fetch() — just use it
 const client = new Client({ 
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
 });
+
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
