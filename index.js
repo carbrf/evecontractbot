@@ -1,15 +1,13 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, InteractionResponseType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 const express = require('express');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch'); // ← ADD THIS LINE
 const crypto = require('crypto');
 
 const client = new Client({ 
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
 });
 const app = express();
-
-// CRITICAL: Parse GET query parameters
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
