@@ -161,6 +161,8 @@ setInterval(async () => {
         const res = await fetch(`${ESI_BASE}/characters/${char.charId}/contracts/`, {
           headers: { Authorization: `Bearer ${char.access_token}` }
         });
+
+        
 const contracts = await res.json();
 console.log(`DEBUG Poll: ${char.charName} has ${contracts.length} contracts`);
 
@@ -169,6 +171,9 @@ const newEvents = contracts.filter(c =>
   c.date_accepted && new Date(c.date_accepted) > lastPoll
 );
 
+console.log(`New events since ${lastPoll.toISOString()}: ${newEvents.length}`);
+
+// SEND ALERTS
 if (newEvents.length > 0) {
   console.log(`ALERT: ${newEvents.length} new event(s) for ${char.charName}`);
   const channel = await client.channels.fetch(char.channelId);
@@ -199,14 +204,16 @@ if (newEvents.length > 0) {
         { name: 'Title', value: c.title || '—', inline: false },
         { name: 'Time', value: `<t:${Math.floor(new Date(c.date_accepted).getTime()/1000)}:F>`, inline: false }
       )
-      .setColor(color)
-      .setTimestamp();
+      .setColor(color);
 
     await channel.send({ content: `<@${userId}>`, embeds: [embed] });
   }
 }
 
+// UPDATE lastPoll — **ALWAYS**
 char.lastPoll = new Date().toISOString();
+
+
         
       } catch (e) { console.error('Poll error:', e); }
     }
