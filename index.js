@@ -161,25 +161,53 @@ setInterval(async () => {
         const res = await fetch(`${ESI_BASE}/characters/${char.charId}/contracts/`, {
           headers: { Authorization: `Bearer ${char.access_token}` }
         });
-        const contracts = await res.json();
-        const lastPoll = new Date(char.lastPoll);
-        const accepted = contracts.filter(c => c.status === 'accepted' && new Date(c.date_accepted) > lastPoll);
-        if (accepted.length) {
-          const channel = await client.channels.fetch(char.channelId);
-          for (const c of accepted) {
-            const embed = new EmbedBuilder()
-              .setTitle('Contract Accepted!')
-              .setDescription(`**${char.charName}**`)
-              .addFields(
-                { name: 'ID', value: `${c.contract_id}`, inline: true },
-                { name: 'Title', value: c.title || '—', inline: true },
-                { name: 'Time', value: `<t:${Math.floor(new Date(c.date_accepted).getTime()/1000)}:F>`, inline: false }
-              )
-              .setColor(0x00ff00);
-            channel.send({ content: `<@${userId}>`, embeds: [embed] });
-          }
-        }
-        char.lastPoll = new Date().toISOString();
+const contracts = await res.json();
+console.log(`DEBUG Poll: ${char.charName} has ${contracts.length} contracts`);
+
+const lastPoll = new Date(char.lastPoll);
+const newEvents = contracts.filter(c => 
+  c.date_accepted && new Date(c.date_accepted) > lastPoll
+);
+
+if (newEvents.length > 0) {
+  console.log(`ALERT: ${newEvents.length} new event(s) for ${char.charName}`);
+  const channel = await client.channels.fetch(char.channelId);
+
+  for (const c of newEvents) {
+    let title = '', color = 0x000000, statusText = '';
+
+    if (c.status === 'finished') {
+      title = 'Contract Completed!';
+      color = 0x00ff00;
+      statusText = 'Finished';
+    } else if (c.status === 'rejected') {
+      title = 'Contract Rejected!';
+      color = 0xff0000;
+      statusText = 'Rejected';
+    } else if (c.status === 'in_progress' || c.status === 'accepted') {
+      title = 'Contract Accepted!';
+      color = 0x0099ff;
+      statusText = 'Accepted';
+    } else continue;
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(`**${char.charName}**`)
+      .addFields(
+        { name: 'Status', value: statusText, inline: true },
+        { name: 'ID', value: `${c.contract_id}`, inline: true },
+        { name: 'Title', value: c.title || '—', inline: false },
+        { name: 'Time', value: `<t:${Math.floor(new Date(c.date_accepted).getTime()/1000)}:F>`, inline: false }
+      )
+      .setColor(color)
+      .setTimestamp();
+
+    await channel.send({ content: `<@${userId}>`, embeds: [embed] });
+  }
+}
+
+char.lastPoll = new Date().toISOString();
+        
       } catch (e) { console.error('Poll error:', e); }
     }
   }
