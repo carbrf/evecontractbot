@@ -63,39 +63,75 @@ client.on('interactionCreate', async (i) => {
 
 app.get('/callback', async (req, res) => {
   const { code, state } = req.query;
-  if (!code || !state || !users[state]) return res.status(400).send('Invalid auth.');
+  if (!code || !state || !users[state]) {
+    return res.status(400).send('<h1>Invalid or expired link.</h1><p>Go back to Discord and run /setup again.</p>');
+  }
 
   const { verifier, userId, channelId } = users[state];
   delete users[state];
 
   try {
+    // Exchange code for tokens
     const tokenRes = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'authorization_code', code, client_id: process.env.EVE_CLIENT_ID, code_verifier: verifier })
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        client_id: process.env.EVE_CLIENT_ID,
+        code_verifier: verifier
+      })
     });
     const tokens = await tokenRes.json();
+    if (!tokens.access_token) throw new Error('No access token');
+
+    // Get character ID from JWT
     const payload = JSON.parse(Buffer.from(tokens.access_token.split('.')[1], 'base64url').toString());
     const charId = parseInt(payload.sub.split(':')[2]);
 
-    const charRes = await fetch(`${ESI_BASE}/characters/${charId}/`, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+    // Get character name
+    const charRes = await fetch(`${ESI_BASE}/characters/${charId}/`, {
+      headers: { Authorization: `Bearer ${tokens.access_token}` }
+    });
     const charData = await charRes.json();
     const charName = charData.name;
 
+    // Save to user
     if (!users[userId]) users[userId] = [];
     const existing = users[userId].find(c => c.charId === charId);
     if (existing) {
-      Object.assign(existing, { access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires_at: Date.now() + tokens.expires_in * 1000, lastPoll: new Date().toISOString() });
+      Object.assign(existing, {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at: Date.now() + tokens.expires_in * 1000,
+        lastPoll: new Date().toISOString()
+      });
     } else {
-      users[userId].push({ charId, charName, access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires_at: Date.now() + tokens.expires_in * 1000, channelId, lastPoll: new Date().toISOString() });
+      users[userId].push({
+        charId,
+        charName,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at: Date.now() + tokens.expires_in * 1000,
+        channelId,
+        lastPoll: new Date().toISOString()
+      });
     }
 
+    // Send success to Discord
     const channel = await client.channels.fetch(channelId);
-    await channel.send(`Success! **${charName}** is now being monitored. Use /status to view.`);
-    res.send(`<h1>Linked!</h1><p>Close tab. Monitoring <strong>${charName}</strong>.</p>`);
+    await channel.send(`**${charName}** linked! Monitoring contracts. Use /status to view.`);
+
+    // Show nice success page
+    res.send(`
+      <h1>Success!</h1>
+      <p><strong>${charName}</strong> is now linked.</p>
+      <p>You can close this tab.</p>
+      <script>setTimeout(() => window.close(), 3000);</script>
+    `);
   } catch (err) {
-    console.error(err);
-    res.status(500).send('Auth failed. Try /setup again.');
+    console.error('Auth error:', err);
+    res.status(500).send('<h1>Auth failed.</h1><p>Try /setup again in Discord.</p>');
   }
 });
 
