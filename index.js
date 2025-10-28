@@ -7,6 +7,10 @@ const crypto = require('crypto');
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const app = express();
 
+// CRITICAL: Parse URL query parameters
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 // Storage: userId → array of characters
 let users = {};
 
@@ -61,17 +65,19 @@ client.on('interactionCreate', async (i) => {
   }
 });
 
+// FIXED CALLBACK ROUTE
 app.get('/callback', async (req, res) => {
-  const { code, state } = req.query;
+  const { code, state } = req.query; // Now works!
+  console.log('Callback hit:', { code: code ? 'present' : 'missing', state });
+
   if (!code || !state || !users[state]) {
-    return res.status(400).send('<h1>Invalid or expired link.</h1><p>Go back to Discord and run /setup again.</p>');
+    return res.status(400).send('<h1>Invalid Link</h1><p>Run /setup again in Discord.</p>');
   }
 
   const { verifier, userId, channelId } = users[state];
   delete users[state];
 
   try {
-    // Exchange code for tokens
     const tokenRes = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -85,18 +91,15 @@ app.get('/callback', async (req, res) => {
     const tokens = await tokenRes.json();
     if (!tokens.access_token) throw new Error('No access token');
 
-    // Get character ID from JWT
     const payload = JSON.parse(Buffer.from(tokens.access_token.split('.')[1], 'base64url').toString());
     const charId = parseInt(payload.sub.split(':')[2]);
 
-    // Get character name
     const charRes = await fetch(`${ESI_BASE}/characters/${charId}/`, {
       headers: { Authorization: `Bearer ${tokens.access_token}` }
     });
     const charData = await charRes.json();
     const charName = charData.name;
 
-    // Save to user
     if (!users[userId]) users[userId] = [];
     const existing = users[userId].find(c => c.charId === charId);
     if (existing) {
@@ -118,29 +121,34 @@ app.get('/callback', async (req, res) => {
       });
     }
 
-    // Send success to Discord
     const channel = await client.channels.fetch(channelId);
-    await channel.send(`**${charName}** linked! Monitoring contracts. Use /status to view.`);
+    await channel.send(`**${charName}** linked! Monitoring contracts. Use /status.`);
 
-    // Show nice success page
     res.send(`
       <h1>Success!</h1>
       <p><strong>${charName}</strong> is now linked.</p>
-      <p>You can close this tab.</p>
-      <script>setTimeout(() => window.close(), 3000);</script>
+      <p>Close this tab.</p>
     `);
   } catch (err) {
     console.error('Auth error:', err);
-    res.status(500).send('<h1>Auth failed.</h1><p>Try /setup again in Discord.</p>');
+    res.status(500).send('<h1>Failed</h1><p>Try /setup again.</p>');
   }
 });
 
+// Poll every 5 minutes
 setInterval(async () => {
   for (const [userId, chars] of Object.entries(users)) {
     for (const char of chars) {
       if (Date.now() > char.expires_at) {
         try {
-          const res = await fetch(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': 'Basic ' + Buffer.from(`${process.env.EVE_CLIENT_ID}:${process.env.EVE_CLIENT_SECRET}`).toString('base64') }, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: char.refresh_token }) });
+          const res = await fetch(TOKEN_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Authorization': 'Basic ' + Buffer.from(`${process.env.EVE_CLIENT_ID}:${process.env.EVE_CLIENT_SECRET}`).toString('base64')
+            },
+            body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: char.refresh_token })
+          });
           const t = await res.json();
           char.access_token = t.access_token;
           char.expires_at = Date.now() + t.expires_in * 1000;
@@ -148,7 +156,9 @@ setInterval(async () => {
       }
 
       try {
-        const res = await fetch(`${ESI_BASE}/characters/${char.charId}/contracts/`, { headers: { Authorization: `Bearer ${char.access_token}` } });
+        const res = await fetch(`${ESI_BASE}/characters/${char.charId}/contracts/`, {
+          headers: { Authorization: `Bearer ${char.access_token}` }
+        });
         const contracts = await res.json();
         const lastPoll = new Date(char.lastPoll);
         const accepted = contracts.filter(c => c.status === 'accepted' && new Date(c.date_accepted) > lastPoll);
@@ -160,7 +170,7 @@ setInterval(async () => {
               .setTitle('Contract Accepted!')
               .setDescription(`**${char.charName}**`)
               .addFields(
-                { name: 'Contract ID', value: `${c.contract_id}`, inline: true },
+                { name: 'ID', value: `${c.contract_id}`, inline: true },
                 { name: 'Title', value: c.title || '—', inline: true },
                 { name: 'Time', value: `<t:${Math.floor(new Date(c.date_accepted).getTime()/1000)}:F>`, inline: false }
               )
@@ -175,5 +185,5 @@ setInterval(async () => {
 }, 5 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server on ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 client.login(process.env.DISCORD_TOKEN);
