@@ -1,31 +1,74 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 const express = require('express');
-// ← REMOVE: const fetch = require('node-fetch');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
-// Node.js 18+ has global fetch() — just use it
+const DATA_FILE = path.join(__dirname, 'data', 'users.json');
+
 const client = new Client({ 
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
 });
-
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// === PERSISTENT USER DATA ===
 let users = {};
+try {
+  if (fs.existsSync(DATA_FILE)) {
+    const data = fs.readFileSync(DATA_FILE, 'utf8');
+    users = JSON.parse(data);
+    console.log(`Loaded ${Object.keys(users).length} users from disk`);
+  } else {
+    console.log('No saved users found, starting fresh');
+  }
+} catch (err) {
+  console.error('Failed to load users:', err);
+}
 
+function saveUsers() {
+  try {
+    const dir = path.dirname(DATA_FILE);
+    console.log(`[SAVE] Attempting to save to: ${DATA_FILE}`);
+    console.log(`[SAVE] Directory exists: ${fs.existsSync(dir)}`);
+
+    // Ensure directory exists
+    fs.mkdirSync(dir, { recursive: true });
+    console.log(`[SAVE] Directory created/confirmed: ${dir}`);
+
+    // Write file
+    fs.writeFileSync(DATA_FILE, JSON.stringify(users, null, 2), 'utf8');
+    console.log(`[SAVE] SUCCESS: users.json saved with ${Object.keys(users).length} users`);
+    
+    // Verify file exists
+    if (fs.existsSync(DATA_FILE)) {
+      const stats = fs.statSync(DATA_FILE);
+      console.log(`[SAVE] File verified: ${stats.size} bytes`);
+    } else {
+      console.error(`[SAVE] ERROR: File NOT created!`);
+    }
+  } catch (err) {
+    console.error('[SAVE] FAILED:', err.message);
+    console.error('[SAVE] Stack:', err.stack);
+  }
+}
+
+// === ESI & AUTH CONSTANTS ===
 const ESI_BASE = 'https://esi.evetech.net/latest';
 const AUTH_URL = 'https://login.eveonline.com/v2/oauth/authorize';
 const TOKEN_URL = 'https://login.eveonline.com/v2/oauth/token';
 const SCOPES = 'esi-contracts.read_character_contracts.v1';
 
+// === PKCE HELPERS ===
 function generatePKCE() {
   const verifier = crypto.randomBytes(32).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
   return { verifier, challenge };
 }
 
+// === DISCORD COMMANDS ===
 client.once('ready', async () => {
   console.log(`Bot online: ${client.user.tag}`);
   await client.application.commands.set([
@@ -33,11 +76,13 @@ client.once('ready', async () => {
     new SlashCommandBuilder().setName('status').setDescription('View monitored characters'),
     new SlashCommandBuilder().setName('remove').setDescription('Remove character').addStringOption(o => 
       o.setName('name').setDescription('Character name').setRequired(true)
-    )
+    ),
+    new SlashCommandBuilder().setName('resetpoll').setDescription('Reset poll timer (testing)')
   ]);
   console.log('Commands registered.');
 });
 
+// === INTERACTION HANDLER ===
 client.on('interactionCreate', async (i) => {
   if (!i.isChatInputCommand()) return;
   try {
@@ -66,7 +111,16 @@ client.on('interactionCreate', async (i) => {
       const idx = chars.findIndex(c => c.charName.toLowerCase() === name.toLowerCase());
       if (idx === -1) return i.reply({ content: `Not found: ${name}`, flags: 64 });
       chars.splice(idx, 1);
+      saveUsers();
       await i.reply({ content: `Removed **${name}**.`, flags: 64 });
+    }
+
+    if (commandName === 'resetpoll') {
+      const chars = users[user.id] || [];
+      if (!chars.length) return i.reply({ content: 'No characters linked.', flags: 64 });
+      chars.forEach(c => c.lastPoll = new Date().toISOString());
+      saveUsers();
+      await i.reply({ content: `Poll timer reset for ${chars.length} character(s).`, flags: 64 });
     }
   } catch (err) {
     console.error('Interaction error:', err);
@@ -74,6 +128,7 @@ client.on('interactionCreate', async (i) => {
   }
 });
 
+// === OAUTH CALLBACK ===
 app.get('/callback', async (req, res) => {
   const { code, state } = req.query;
   console.log('Callback received:', { code: code ? 'present' : 'missing', state });
@@ -115,7 +170,8 @@ app.get('/callback', async (req, res) => {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at: Date.now() + tokens.expires_in * 1000,
-        lastPoll: new Date().toISOString()
+        lastPoll: new Date().toISOString(),
+        trackedContracts: existing.trackedContracts || []
       });
     } else {
       users[userId].push({
@@ -124,24 +180,30 @@ app.get('/callback', async (req, res) => {
         refresh_token: tokens.refresh_token,
         expires_at: Date.now() + tokens.expires_in * 1000,
         channelId,
-        lastPoll: new Date().toISOString()
+        lastPoll: new Date().toISOString(),
+        trackedContracts: []
       });
     }
+
+    saveUsers();
 
     const channel = await client.channels.fetch(channelId);
     await channel.send(`**${charName}** linked! Use /status.`);
 
-    res.send(`<h1>Success!</h1><p>${charName} is now linked. Close this tab.</p>`);
+    res.send(`<h1>Success!</h1><p>${charName} is now linked. Close tab.</p>`);
   } catch (err) {
     console.error('Auth error:', err);
     res.status(500).send('<h1>Failed</h1><p>Try /setup again.</p>');
   }
 });
 
+// === POLLING LOOP ===
 setInterval(async () => {
+  console.log('Starting poll cycle...');
   for (const [userId, chars] of Object.entries(users)) {
     if (!Array.isArray(chars)) continue;
     for (const char of chars) {
+      // Refresh token if expired
       if (Date.now() > char.expires_at) {
         try {
           const res = await fetch(TOKEN_URL, {
@@ -155,71 +217,136 @@ setInterval(async () => {
           const t = await res.json();
           char.access_token = t.access_token;
           char.expires_at = Date.now() + t.expires_in * 1000;
-        } catch (e) { console.error('Refresh failed:', e); continue; }
+          saveUsers();
+          console.log(`Token refreshed for ${char.charName}`);
+        } catch (e) { 
+          console.error('Refresh failed for', char.charName, ':', e); 
+          continue; 
+        }
       }
+
       try {
-        const res = await fetch(`${ESI_BASE}/characters/${char.charId}/contracts/`, {
+        const res = await fetch(`${ESI_BASE}/characters/${char.charId}/contracts/?datasource=tranquility`, {
           headers: { Authorization: `Bearer ${char.access_token}` }
         });
+        if (!res.ok) {
+          console.error(`Contracts fetch failed: HTTP ${res.status}`);
+          continue;
+        }
+        const activeContracts = await res.json();
+        console.log(`DEBUG: ${char.charName} → ${activeContracts.length} active contracts`);
 
-        
-const contracts = await res.json();
-console.log(`DEBUG Poll: ${char.charName} has ${contracts.length} contracts`);
+        if (!Array.isArray(char.trackedContracts)) char.trackedContracts = [];
 
-const lastPoll = new Date(char.lastPoll);
-const newEvents = contracts.filter(c => 
-  c.date_accepted && new Date(c.date_accepted) > lastPoll
-);
+        const trackedIds = char.trackedContracts.map(c => c.id);
+        const newIssued = activeContracts.filter(c => 
+          c.status === 'outstanding' && !trackedIds.includes(c.contract_id)
+        );
 
-console.log(`New events since ${lastPoll.toISOString()}: ${newEvents.length}`);
+        newIssued.forEach(c => {
+          char.trackedContracts.push({
+            id: c.contract_id,
+            title: c.title || '—',
+            issued: c.date_issued,
+            status: 'outstanding'
+          });
+          console.log(`NEW ISSUED: ${c.contract_id}`);
+        });
 
-// SEND ALERTS
-if (newEvents.length > 0) {
-  console.log(`ALERT: ${newEvents.length} new event(s) for ${char.charName}`);
-  const channel = await client.channels.fetch(char.channelId);
+        const updates = [];
+        for (const tracked of char.trackedContracts) {
+          const active = activeContracts.find(c => c.contract_id === tracked.id);
+          
+          if (!active) {
+            if (['outstanding', 'in_progress'].includes(tracked.status)) {
+              try {
+                const detailRes = await fetch(`${ESI_BASE}/characters/${char.charId}/contracts/${tracked.id}/?datasource=tranquility`, {
+                  headers: { Authorization: `Bearer ${char.access_token}` }
+                });
+                if (detailRes.ok) {
+                  const detail = await detailRes.json();
+                  if (detail.status === 'finished') {
+                    updates.push({ ...tracked, status: 'finished', time: detail.date_completed });
+                  } else if (detail.status === 'rejected') {
+                    updates.push({ ...tracked, status: 'rejected', time: detail.date_expired });
+                  }
+                }
+              } catch (e) {
+                updates.push({ ...tracked, status: 'finished', time: new Date().toISOString() });
+              }
+              char.trackedContracts = char.trackedContracts.filter(t => t.id !== tracked.id);
+            }
+            continue;
+          }
 
-  for (const c of newEvents) {
-    let title = '', color = 0x000000, statusText = '';
+          if (tracked.status === 'outstanding' && active.status === 'in_progress') {
+            updates.push({ ...tracked, status: 'accepted', time: active.date_accepted });
+            tracked.status = 'in_progress';
+          }
+        }
 
-    if (c.status === 'finished') {
-      title = 'Contract Completed!';
-      color = 0x00ff00;
-      statusText = 'Finished';
-    } else if (c.status === 'rejected') {
-      title = 'Contract Rejected!';
-      color = 0xff0000;
-      statusText = 'Rejected';
-    } else if (c.status === 'in_progress' || c.status === 'accepted') {
-      title = 'Contract Accepted!';
-      color = 0x0099ff;
-      statusText = 'Accepted';
-    } else continue;
+        if (updates.length > 0) {
+          console.log(`ALERT: ${updates.length} update(s) for ${char.charName}`);
+          const channel = await client.channels.fetch(char.channelId);
+          for (const u of updates) {
+            let title = '', color = 0x000000, statusText = '';
+            if (u.status === 'accepted') { title = 'Contract Accepted!'; color = 0x0099ff; statusText = 'Accepted'; }
+            else if (u.status === 'finished') { title = 'Contract Completed!'; color = 0x00ff00; statusText = 'Finished'; }
+            else if (u.status === 'rejected') { title = 'Contract Rejected!'; color = 0xff0000; statusText = 'Rejected'; }
 
-    const embed = new EmbedBuilder()
-      .setTitle(title)
-      .setDescription(`**${char.charName}**`)
-      .addFields(
-        { name: 'Status', value: statusText, inline: true },
-        { name: 'ID', value: `${c.contract_id}`, inline: true },
-        { name: 'Title', value: c.title || '—', inline: false },
-        { name: 'Time', value: `<t:${Math.floor(new Date(c.date_accepted).getTime()/1000)}:F>`, inline: false }
-      )
-      .setColor(color);
+            const embed = new EmbedBuilder()
+              .setTitle(title)
+              .setDescription(`**${char.charName}**`)
+              .addFields(
+                { name: 'Status', value: statusText, inline: true },
+                { name: 'ID', value: `${u.id}`, inline: true },
+                { name: 'Title', value: u.title, inline: false },
+                { name: 'Time', value: `<t:${Math.floor(new Date(u.time).getTime()/1000)}:F>`, inline: false }
+              )
+              .setColor(color);
 
-    await channel.send({ content: `<@${userId}>`, embeds: [embed] });
-  }
-}
+            await channel.send({ content: `<@${userId}>`, embeds: [embed] });
+          }
+        }
 
-// UPDATE lastPoll — **ALWAYS**
-char.lastPoll = new Date().toISOString();
-
-
-        
-      } catch (e) { console.error('Poll error:', e); }
+        saveUsers();
+      } catch (e) { 
+        console.error('Poll error:', e); 
+      }
     }
   }
 }, 5 * 60 * 1000);
 
+// === STARTUP TOKEN REFRESH ===
+setTimeout(async () => {
+  console.log('Checking expired tokens on startup...');
+  for (const [userId, chars] of Object.entries(users)) {
+    if (!Array.isArray(chars)) continue;
+    for (const char of chars) {
+      if (Date.now() > char.expires_at) {
+        console.log(`Refreshing ${char.charName} on boot`);
+        try {
+          const res = await fetch(TOKEN_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Authorization': 'Basic ' + Buffer.from(`${process.env.EVE_CLIENT_ID}:${process.env.EVE_CLIENT_SECRET}`).toString('base64')
+            },
+            body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: char.refresh_token })
+          });
+          const t = await res.json();
+          char.access_token = t.access_token;
+          char.expires_at = Date.now() + t.expires_in * 1000;
+          saveUsers();
+        } catch (e) {
+          console.error('Startup refresh failed:', e);
+        }
+      }
+    }
+  }
+}, 10000);
+
+// === SERVER & CLIENT LOGIN ===
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 client.login(process.env.DISCORD_TOKEN);
